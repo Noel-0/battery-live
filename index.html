@@ -50,6 +50,10 @@
   .setup p { color: var(--muted); margin: 0 0 14px; }
   .setup input { width: 100%; font: inherit; padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.12); background: var(--bg); color: var(--fg); }
   .setup button { margin-top: 12px; width: 100%; font: inherit; font-weight: 600; padding: 12px; border: 0; border-radius: 10px; background: var(--blue); color: #fff; }
+  .golive { display: none; margin-top: 18px; font: inherit; font-weight: 600; padding: 12px 22px; border: 0; border-radius: 999px; background: var(--card); color: var(--fg); border: 1px solid rgba(255,255,255,.12); }
+  body.paused .golive { display: inline-block; }
+  .livedot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); margin-right: 6px; vertical-align: 1px; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
   body.needs-setup .live { display: none; }
   body.needs-setup .setup { display: block; }
 </style>
@@ -68,6 +72,7 @@
     </div>
     <div class="detail" id="detail">&nbsp;</div>
     <div class="sub" id="sub">&nbsp;</div>
+    <button class="golive" id="golive" type="button">Go live for 30 min</button>
   </div>
 
   <form class="setup" id="setup">
@@ -81,13 +86,15 @@
 (() => {
   const BOLT = '<svg viewBox="0 0 16 16"><path d="M9.5 1 3 9h4l-1 6 6.5-8h-4z"/></svg>';
   const PLUG = '<svg viewBox="0 0 16 16"><path d="M5 1h1.5v3.5h3V1H11v3.5h1v3a4 4 0 0 1-3.25 3.93V15h-1.5v-3.57A4 4 0 0 1 4 7.5v-3h1z"/></svg>';
-  // Expected max gap between messages per state (s); the Mac script's heartbeats plus slack.
-  const EXPECT = { charging: 12 * 60, charged: 22 * 60, ac: 22 * 60, battery: 32 * 60 };
+  // While live the Mac checks in at least every 3 min; allow some slack.
+  const LIVE_GAP = 4 * 60;
+  // How long to wait for the Mac to answer a live request before saying it's asleep.
+  const ANSWER_WAIT = 25;
   const C = 2 * Math.PI * 70;
   const $ = id => document.getElementById(id);
 
   let topic = (location.hash.slice(1) || storeGet() || '').trim();
-  let latest = null, es = null;
+  let latest = null, es = null, requestedAt = 0;
 
   function storeGet() { try { return localStorage.getItem('battery-live-topic'); } catch { return null; } }
   function storeSet(v) { try { localStorage.setItem('battery-live-topic', v); } catch {} }
@@ -120,8 +127,18 @@
       const r = await fetch(base + '/json?poll=1&since=latest', { cache: 'no-store' });
       const text = await r.text();
       text.split('\n').filter(Boolean).forEach(l => { try { accept(JSON.parse(l)); } catch {} });
-      if (!latest) { $('state').textContent = 'Waiting for the Mac…'; $('sub').textContent = 'No update in the last 12 hours'; }
+
     } catch { $('sub').textContent = 'Offline, retrying…'; }
+  }
+
+  // Ask the Mac to send live updates for the next 30 minutes.
+  async function requestLive() {
+    requestedAt = Date.now() / 1000;
+    render();
+    try {
+      await fetch(base + '-req?priority=min', { method: 'POST', body: 'live' });
+    } catch { $('sub').textContent = 'Offline, could not reach the Mac'; }
+    setTimeout(render, (ANSWER_WAIT + 1) * 1000);
   }
 
   function connect() {
@@ -141,9 +158,21 @@
   const toSec = r => { const m = /^(\d+):(\d\d)$/.exec(r || ''); return m ? (+m[1]) * 3600 + (+m[2]) * 60 : null; };
 
   function render() {
-    if (!latest) return;
+    if (!latest) {
+      if (requestedAt) {
+        const late = Date.now() / 1000 - requestedAt > ANSWER_WAIT;
+        $('state').textContent = late ? 'No answer' : 'Asking the Mac…';
+        $('sub').textContent = late ? 'Mac asleep or offline' : '';
+        document.body.classList.toggle('paused', late);
+      }
+      return;
+    }
     const d = latest, now = Date.now() / 1000, age = now - d.ts;
-    const stale = age > (EXPECT[d.state] || 1800);
+    const live = (d.live_until || 0) > now && age < LIVE_GAP;
+    const waiting = requestedAt && d.ts < requestedAt - 5;           // asked, no answer yet
+    const noAnswer = waiting && now - requestedAt > ANSWER_WAIT;
+    const stale = !live || noAnswer;
+    document.body.classList.toggle('paused', !live && !(waiting && !noAnswer));
     const color = d.state === 'charging' || d.state === 'charged' ? 'var(--green)'
       : d.pct <= 10 ? 'var(--red)' : d.pct <= 20 ? 'var(--amber)' : 'var(--fg)';
     document.documentElement.style.setProperty('--level', color);
@@ -165,17 +194,23 @@
     } else if (d.state === 'charged') detail = 'Fully charged';
     else if (d.state === 'ac') detail = 'Holding charge';
     else if (rem != null) detail = `${fmtDur(Math.max(0, d.ts + rem - now))} left`;
-    $('detail').textContent = stale ? 'Mac asleep or offline' : detail;
-    $('detail').classList.toggle('stale', stale);
-    $('sub').textContent = `Updated ${fmtAgo(age)} · ${fmtClock(d.ts)}`;
+    $('detail').textContent = noAnswer ? "Mac didn't answer · asleep or offline" : detail;
+    $('detail').classList.toggle('stale', noAnswer);
+    const sub = $('sub');
+    if (waiting && !noAnswer) sub.textContent = 'Asking the Mac…';
+    else if (live) sub.innerHTML = `<span class="livedot"></span>Live · ${fmtDur(d.live_until - now)} left · updated ${fmtAgo(age)}`;
+    else sub.textContent = `Paused · last update ${fmtAgo(age)} · ${fmtClock(d.ts)}`;
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { poll(); connect(); }
+    if (document.visibilityState !== 'visible') return;
+    poll(); connect();
+    if (!latest || (latest.live_until || 0) < Date.now() / 1000) requestLive();
   });
-  window.addEventListener('pageshow', e => { if (e.persisted) { poll(); connect(); } });
-  setInterval(render, 15000);
-  poll(); connect();
+  window.addEventListener('pageshow', e => { if (e.persisted) { poll(); connect(); requestLive(); } });
+  $('golive').addEventListener('click', requestLive);
+  setInterval(render, 5000);
+  poll(); connect(); requestLive();
 })();
 </script>
 </body>
