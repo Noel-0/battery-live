@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mac Battery">
+<meta name="theme-color" content="#0b0c0e">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<meta name="darkreader-lock">
+<title>Mac Battery</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #000; --fg: #fff; --muted: #7d828c; --card: rgba(255,255,255,.06);
+    --green: #30d158; --amber: #ffb340; --red: #ff453a; --blue: #4c8dff;
+  }
+  body { background: radial-gradient(120% 70% at 50% 38%, color-mix(in srgb, var(--level, #fff) 16%, #000) 0%, #000 62%) fixed, #000; }
+  .track { stroke: color-mix(in srgb, var(--level, #fff) 16%, #000) !important; }
+  .bar { filter: drop-shadow(0 0 6px color-mix(in srgb, var(--level) 70%, transparent)); }
+  .pct small { color: color-mix(in srgb, #fff 55%, transparent); }
+  .detail { background: var(--card); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 10px 18px; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    color: var(--fg);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    -webkit-user-select: none; user-select: none;
+  }
+  .ring { position: relative; width: min(78vw, 320px); aspect-ratio: 1; }
+  .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+  .ring circle { fill: none; stroke-width: 12; }
+  .bar { stroke: var(--level); stroke-linecap: round; transition: stroke-dashoffset .8s ease, stroke .3s; }
+  .center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .pct { font-size: clamp(64px, 22vw, 104px); font-weight: 700; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; line-height: 1; }
+  .pct small { font-size: .4em; font-weight: 600; color: var(--muted); margin-left: 2px; }
+  .state { margin-top: 10px; font-weight: 600; color: var(--level); display: flex; align-items: center; gap: 6px; }
+  .state svg { width: 16px; height: 16px; fill: currentColor; }
+  .detail { margin-top: 28px; font-size: 20px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; }
+  .sub { margin-top: 6px; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
+  .stale { color: var(--amber); }
+  .stale-ring .bar { stroke: var(--muted); }
+  .setup { display: none; width: 100%; max-width: 360px; background: var(--card); border-radius: 16px; padding: 20px; }
+  .setup h1 { font-size: 20px; margin: 0 0 8px; }
+  .setup p { color: var(--muted); margin: 0 0 14px; }
+  .setup input { width: 100%; font: inherit; padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.12); background: var(--bg); color: var(--fg); }
+  .setup button { margin-top: 12px; width: 100%; font: inherit; font-weight: 600; padding: 12px; border: 0; border-radius: 10px; background: var(--blue); color: #fff; }
+  body.needs-setup .live { display: none; }
+  body.needs-setup .setup { display: block; }
+</style>
+</head>
+<body>
+  <div class="live" style="display:contents">
+    <div class="ring" id="ring">
+      <svg viewBox="0 0 160 160" aria-hidden="true">
+        <circle class="track" cx="80" cy="80" r="70"/>
+        <circle class="bar" id="bar" cx="80" cy="80" r="70" stroke-dasharray="439.82" stroke-dashoffset="439.82"/>
+      </svg>
+      <div class="center">
+        <div class="pct" id="pct" aria-live="polite">--<small>%</small></div>
+        <div class="state" id="state">Connecting…</div>
+      </div>
+    </div>
+    <div class="detail" id="detail">&nbsp;</div>
+    <div class="sub" id="sub">&nbsp;</div>
+  </div>
+
+  <form class="setup" id="setup">
+    <h1>Mac Battery</h1>
+    <p>Enter the topic from <code>battery-live/topic</code> on your Mac.</p>
+    <input id="topicInput" placeholder="mbat-…" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button type="submit">Show battery</button>
+  </form>
+
+<script>
+(() => {
+  const BOLT = '<svg viewBox="0 0 16 16"><path d="M9.5 1 3 9h4l-1 6 6.5-8h-4z"/></svg>';
+  const PLUG = '<svg viewBox="0 0 16 16"><path d="M5 1h1.5v3.5h3V1H11v3.5h1v3a4 4 0 0 1-3.25 3.93V15h-1.5v-3.57A4 4 0 0 1 4 7.5v-3h1z"/></svg>';
+  // Expected max gap between messages per state (s); the Mac script's heartbeats plus slack.
+  const EXPECT = { charging: 12 * 60, charged: 22 * 60, ac: 22 * 60, battery: 32 * 60 };
+  const C = 2 * Math.PI * 70;
+  const $ = id => document.getElementById(id);
+
+  let topic = (location.hash.slice(1) || storeGet() || '').trim();
+  let latest = null, es = null;
+
+  function storeGet() { try { return localStorage.getItem('battery-live-topic'); } catch { return null; } }
+  function storeSet(v) { try { localStorage.setItem('battery-live-topic', v); } catch {} }
+
+  if (!/^[\w-]{8,64}$/.test(topic)) {
+    document.body.classList.add('needs-setup');
+    $('setup').addEventListener('submit', e => {
+      e.preventDefault();
+      const v = $('topicInput').value.trim();
+      if (!/^[\w-]{8,64}$/.test(v)) return;
+      storeSet(v); location.hash = v; location.reload();
+    });
+    return;
+  }
+  storeSet(topic);
+  if (location.hash.slice(1) !== topic) history.replaceState(null, '', '#' + topic);
+
+  const base = 'https://ntfy.sh/' + encodeURIComponent(topic);
+
+  function accept(m) {
+    if (!m || m.event !== 'message') return;
+    let d; try { d = JSON.parse(m.message); } catch { return; }
+    if (typeof d.pct !== 'number') return;
+    if (latest && d.ts < latest.ts) return;
+    latest = d; render();
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch(base + '/json?poll=1&since=latest', { cache: 'no-store' });
+      const text = await r.text();
+      text.split('\n').filter(Boolean).forEach(l => { try { accept(JSON.parse(l)); } catch {} });
+      if (!latest) { $('state').textContent = 'Waiting for the Mac…'; $('sub').textContent = 'No update in the last 12 hours'; }
+    } catch { $('sub').textContent = 'Offline, retrying…'; }
+  }
+
+  function connect() {
+    if (es) es.close();
+    es = new EventSource(base + '/sse');
+    es.onmessage = e => { try { accept(JSON.parse(e.data)); } catch {} };
+    es.onerror = () => { /* EventSource retries on its own */ };
+  }
+
+  const fmtDur = s => {
+    s = Math.max(0, Math.round(s / 60));
+    const h = Math.floor(s / 60), m = s % 60;
+    return h ? `${h} h ${m} min` : `${m} min`;
+  };
+  const fmtAgo = s => s < 45 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min ago`;
+  const fmtClock = t => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const toSec = r => { const m = /^(\d+):(\d\d)$/.exec(r || ''); return m ? (+m[1]) * 3600 + (+m[2]) * 60 : null; };
+
+  function render() {
+    if (!latest) return;
+    const d = latest, now = Date.now() / 1000, age = now - d.ts;
+    const stale = age > (EXPECT[d.state] || 1800);
+    const color = d.state === 'charging' || d.state === 'charged' ? 'var(--green)'
+      : d.pct <= 10 ? 'var(--red)' : d.pct <= 20 ? 'var(--amber)' : 'var(--fg)';
+    document.documentElement.style.setProperty('--level', color);
+    $('ring').classList.toggle('stale-ring', stale);
+    $('bar').style.strokeDashoffset = C * (1 - d.pct / 100);
+    $('pct').innerHTML = `${d.pct}<small>%</small>`;
+    document.title = `${d.pct}% · Mac Battery`;
+
+    const labels = { charging: BOLT + 'Charging', charged: PLUG + 'Charged', ac: PLUG + 'Plugged in, not charging', battery: 'On battery' };
+    $('state').innerHTML = labels[d.state] || d.state;
+
+    const rem = toSec(d.remain);
+    let detail = '';
+    if (d.state === 'charging') {
+      if (rem != null) {
+        const eta = d.ts + rem, left = eta - now;
+        detail = left > 60 ? `Full in ${fmtDur(left)} · ~${fmtClock(eta)}` : 'Almost full';
+      } else detail = 'Estimating time to full…';
+    } else if (d.state === 'charged') detail = 'Fully charged';
+    else if (d.state === 'ac') detail = 'Holding charge';
+    else if (rem != null) detail = `${fmtDur(Math.max(0, d.ts + rem - now))} left`;
+    $('detail').textContent = stale ? 'Mac asleep or offline' : detail;
+    $('detail').classList.toggle('stale', stale);
+    $('sub').textContent = `Updated ${fmtAgo(age)} · ${fmtClock(d.ts)}`;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { poll(); connect(); }
+  });
+  window.addEventListener('pageshow', e => { if (e.persisted) { poll(); connect(); } });
+  setInterval(render, 15000);
+  poll(); connect();
+})();
+</script>
+</body>
+</html>
