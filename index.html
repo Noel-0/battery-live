@@ -35,6 +35,7 @@
   .ring { position: relative; width: min(78vw, 320px); aspect-ratio: 1; }
   .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
   .ring circle { fill: none; stroke-width: 12; }
+  .tick { stroke: rgba(255,255,255,.55); stroke-width: 18 !important; }
   .bar { stroke: var(--level); stroke-linecap: round; transition: stroke-dashoffset .8s ease, stroke .3s; }
   .center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
   .pct { font-size: clamp(64px, 22vw, 104px); font-weight: 700; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; line-height: 1; }
@@ -64,6 +65,7 @@
       <svg viewBox="0 0 160 160" aria-hidden="true">
         <circle class="track" cx="80" cy="80" r="70"/>
         <circle class="bar" id="bar" cx="80" cy="80" r="70" stroke-dasharray="439.82" stroke-dashoffset="439.82"/>
+        <circle class="tick" id="tick" cx="80" cy="80" r="70" stroke-dasharray="2 437.82" stroke-dashoffset="-394.84"/>
       </svg>
       <div class="center">
         <div class="pct" id="pct" aria-live="polite">--<small>%</small></div>
@@ -173,7 +175,9 @@
     const noAnswer = waiting && now - requestedAt > ANSWER_WAIT;
     const stale = !live || noAnswer;
     document.body.classList.toggle('paused', !live && !(waiting && !noAnswer));
-    const color = d.state === 'charging' || d.state === 'charged' ? 'var(--green)'
+    const limit = d.limit || 90;
+    $('tick').style.strokeDashoffset = -(C * limit / 100 - 1);
+    const color = d.state === 'charging' || d.state === 'charged' || d.state === 'limit' ? 'var(--green)'
       : d.pct <= 10 ? 'var(--red)' : d.pct <= 20 ? 'var(--amber)' : 'var(--fg)';
     document.documentElement.style.setProperty('--level', color);
     $('ring').classList.toggle('stale-ring', stale);
@@ -181,17 +185,21 @@
     $('pct').innerHTML = `${d.pct}<small>%</small>`;
     document.title = `${d.pct}% · Mac Battery`;
 
-    const labels = { charging: BOLT + 'Charging', charged: PLUG + 'Charged', ac: PLUG + 'Plugged in, not charging', battery: 'On battery' };
+    const labels = { charging: BOLT + 'Charging', charged: PLUG + 'Charged', limit: PLUG + `Charged to ${limit}%`, ac: PLUG + 'Plugged in, not charging', battery: 'On battery' };
     $('state').innerHTML = labels[d.state] || d.state;
 
     const rem = toSec(d.remain);
     let detail = '';
-    if (d.state === 'charging') {
+    if (d.state === 'charging' && typeof d.eta === 'number') {
+      const eta = d.ts + d.eta, left = eta - now;
+      detail = left > 60 ? `${limit}% in ${fmtDur(left)} · ~${fmtClock(eta)}` : `Almost at ${limit}%`;
+    } else if (d.state === 'charging') {
       if (rem != null) {
         const eta = d.ts + rem, left = eta - now;
         detail = left > 60 ? `Full in ${fmtDur(left)} · ~${fmtClock(eta)}` : 'Almost full';
       } else detail = 'Estimating time to full…';
     } else if (d.state === 'charged') detail = 'Fully charged';
+    else if (d.state === 'limit') detail = `Done · stopped at ${limit}%`;
     else if (d.state === 'ac') detail = 'Holding charge';
     else if (rem != null) detail = `${fmtDur(Math.max(0, d.ts + rem - now))} left`;
     $('detail').textContent = noAnswer ? "Mac didn't answer · asleep or offline" : detail;
